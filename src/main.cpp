@@ -1,23 +1,40 @@
-#include <Arduino.h>
-#include "Adafruit_BMP3XX.h"
-#include "RunningMedian.h"
-#include <ESP8266WiFi.h>        // Include the Wi-Fi library
+#include "Arduino.h"
+#include "bme68xLibrary.h"
+#include <ESP8266WiFi.h>
 #include <ESP8266HTTPClient.h>
 #include <WiFiClient.h>
+#include <RunningMedian.h>
 
-#define NB_AVG      50
+// Mettre à jour les info suivante pour configurer le WiFi:
+const char *ssid = "WiFi-NAME";
+const char *password = "WiFi-Password";
 
-#define DAY_HOUR      14
-#define DAY_MINUTE    00
-#define NIGHT_HOUR    02
-#define NIGHT_MINUTE  00
+const char *server_address = "SERVER_ADDRESS"; //"192.168.1.236";
+const char *name_of_local_station = "St-Jean-Chrysostome";
 
-#define DEBUG
+// BE CARFUL, the following strings are using %s for data substitution
+const char *POST_current_weather = "http://%s:8025/addWeather?station_name=%s&temperature=%s&humidity=%s&pressure=%s&wind_speed=%s&air_quality=%s";
+const char *POST_daily_weather   = "http://%s:8025/addWeather365?station_name=%s&temperature=%s&humidity=%s&pressure=%s";
 
-//const char *ssid = "LE NOM DU WIFI";
-//const char *password = "MOT DE PASSE DU WIFI";
-const char *ssid = "TheAlienHub";
-const char *password = "livelyship925";
+// Example: 
+// http://weather.computatrum.cloud:8025/addWeather?station_name=St-Jean-Chrysostome&temperature=15&humidity=50&pressure=1005&wind_speed=0&air_quality=0
+
+// =====> UPDATED to send windsensor data more often for debug purpose
+const int SENDING_TO_SERVER_TIME_INTERVAL = 1;  // Time in minutes
+const int NB_AVG = 50;
+
+// Times at which the daily weather values will be recorded
+const int DAY_HOUR      = 14;
+const int DAY_MINUTE    = 00;
+const int NIGHT_HOUR    = 02;
+const int NIGHT_MINUTE  = 00;
+
+//**********************************************************************************************
+#define SDA_PIN 2
+#define SCL_PIN 14
+#define ADD_I2C 0x77  // 0x76 or 0x77
+
+#define analogPin A0 /* ESP8266 Analog Pin ADC0 = A0 */
 
 const char* ntpServer = "north-america.pool.ntp.org";
 const long  gmtOffset_sec = -18000;   // -5 * 60 * 60 = -18000
@@ -25,78 +42,63 @@ const int   daylightOffset_sec = 3600;
 struct tm weather365Time;
 bool notSaved = true;
 
-// Windspeed sensor on GPIO26
-const byte interruptPin = 26;
-volatile int interruptCounter = 0;
-
-unsigned long Time = 0;
-unsigned long OldTime = 0;
-float tourParSeconde = 0.0f;
-
-unsigned long wifiSendData_time = 0;
+unsigned long currentTime = 0;
 unsigned long wifiSendData_OldTime = 0;
-
-unsigned long updateData_time = 0;
 unsigned long updateData_OldTime = 0;
 
-float humidity    = 0.0f;
-float temperature = 0.0f;
-float pressure    = 0.0f;
-float WindSpeed   = 0.0f;
+struct weather_var
+{
+  float temperature = 0;
+  float pressure    = 0;
+  float humidity    = 0;
+  float AirQuality  = 0;
+  float WindSpeed   = 0;
 
-Adafruit_BMP3XX bmp;
+  float median_Temperature = 0;
+  float median_Pression = 0;
+  float median_Humidity = 0;
+  float median_AirQuality = 0;
+  float median_Windspeed = 0;
+}weather_var;
 
 RunningMedian samples_Temperature = RunningMedian(NB_AVG);
 RunningMedian samples_Pression = RunningMedian(NB_AVG);
-RunningMedian samples_WindSpeed = RunningMedian(NB_AVG);
 RunningMedian samples_Humidity = RunningMedian(NB_AVG);
+RunningMedian samples_WindSpeed = RunningMedian(NB_AVG);
+RunningMedian samples_AirQuality = RunningMedian(NB_AVG);
 
-float median_Temperature = 0;
-float median_Pression = 0;
-float median_Humidity = 0;
-float highest_WindSpeed = 0;
+Bme68x bme;
+bme68xData data;
 
+// Function declaration. Definitions are at the end of this file
+void initializeSensor(void);
+void getWeatherDataFromSensor(void);
+float getWindSpeed(void);
 void printLocalTime(void);
+void try_reconnect_to_wifi(void);
+void send_weather_data_to_server(char *buffer);
 
-//portMUX_TYPE mux = portMUX_INITIALIZER_UNLOCKED;
-void IRAM_ATTR isr() {
-  //portENTER_CRITICAL_ISR(&mux);
-  interruptCounter++;
-  Time = millis();
-  //portEXIT_CRITICAL_ISR(&mux);
-}
+// *******************************************************************************************
+// Setup the ESP8266, the sensor and connect to WiFi
+// This function is executed only once at start-up
+// *******************************************************************************************
+void setup(void)
+{
+	Serial.begin(115200);
+	while (!Serial);
+  Serial.println("WEATHER-MAN BASE STATION is booting...");
+		
+	initializeSensor();
 
-void setup() {
-  Serial.begin(9600);
-  while (!Serial);
-  Serial.println("");
-  Serial.println("WEATHER-MAN BASE STATION");
-
-  pinMode(interruptPin, INPUT);
-  attachInterrupt(digitalPinToInterrupt(interruptPin), isr, FALLING);
-
-  if(!bmp.begin_I2C())  // Temperature + Pressure sensor
-  {
-    Serial.println("Unable to connect to BMP388...");
-    while(1);
-  }
-  // Set up oversampling and filter initialization
-  bmp.setTemperatureOversampling(BMP3_NO_OVERSAMPLING);
-  bmp.setPressureOversampling(BMP3_OVERSAMPLING_4X);
-  bmp.setIIRFilterCoeff(BMP3_IIR_FILTER_DISABLE);
-  bmp.performReading();
-
-  delay(5000); // Delay needed before calling the WiFi.begin
-
+  delay(1000);  // Delay needed before calling the WiFi.begin
+  
   WiFi.begin(ssid, password);
-
   while (WiFi.status() != WL_CONNECTED)
-  { //Check for the connection
+  {
     Serial.println("Connecting to WiFi..");
     delay(2000);
   }
-  Serial.println("Connected to the WiFi network");
-
+  Serial.println("Connected to the WiFi network: " + String(ssid));
   configTime(gmtOffset_sec, daylightOffset_sec, ntpServer);
   printLocalTime();
   Serial.println();
@@ -104,173 +106,38 @@ void setup() {
   // Get the latest timing
   updateData_OldTime = millis();    // To get new sensors data and averaging
   wifiSendData_OldTime = millis();  // To upload new data to server
-  // OldTime = millis();               // For the interrupt : Wind Speed sensor
 
+	Serial.println("TimeStamp(ms), Temperature(deg C), Pressure(Pa), Humidity(%), Gas resistance(ohm), Status");
 }
 
-void loop() {
-  
-  if(interruptCounter > 0)
-  {
-      //portENTER_CRITICAL(&mux);
-      interruptCounter--;
-      //portEXIT_CRITICAL(&mux);
-
-      tourParSeconde = 1 / ((float)(Time - OldTime) / 1000.0f);
-      WindSpeed = tourParSeconde * 2 * PI * 0.0775;
-
-#ifdef DEBUG_WIND_SPEED
-      Serial.print("Time between interrupts: ");
-      Serial.println(Time - OldTime);
-
-      Serial.print("Speed: ");
-      Serial.println(tourParSeconde);
-#endif
-      OldTime = Time;
-  }
+// *******************************************************************************************
+// Main program looping forever
+// *******************************************************************************************
+void loop(void)
+{
+  // Get current time
+  currentTime = millis();
 
   // Getting new data every 10 seconds
-  updateData_time = millis();
-  if((updateData_time - updateData_OldTime) > 10000)
-  //if((updateData_time - updateData_OldTime) > 2000)
+  if((currentTime - updateData_OldTime) > 10000)
   {
-    updateData_OldTime = updateData_time;
-    
-    bmp.performReading();
-    temperature = bmp.temperature;
-    pressure    = bmp.pressure / 1000.0;
-
-    samples_Temperature.add(temperature);
-    samples_Pression.add(pressure);
-    //samples_WindSpeed.add(WindSpeed);
-
-    median_Temperature = samples_Temperature.getMedian();
-    median_Pression = samples_Pression.getMedian();
-    median_Humidity = samples_Humidity.getMedian();
-    highest_WindSpeed = samples_WindSpeed.getHighest();    // Get the highest value of wind speed
-
-#ifdef DEBUG
-    //weatherman.printLocalTime();
-
-    Serial.println("->AvgTemp = " + String(median_Temperature)
-                    + " AvgHum = " + String(median_Humidity)
-                    + " AvgPress = " + String(median_Pression)
-                    + " AvgWindSpeed = " + String(highest_WindSpeed));
-
-    Serial.print("Temperature BMP = ");
-    Serial.print(temperature);
-    Serial.println(" °C");
-
-    Serial.print("Humidity = ");
-    Serial.print(humidity);
-    Serial.println(" %");
-
-    Serial.print("Pressure = ");
-    Serial.print(pressure);
-    Serial.println(" kPa");
-
-    Serial.print("Wind Speed = ");
-    Serial.print(WindSpeed);
-    Serial.println(" m/s");
-#endif
+    updateData_OldTime = currentTime;
+    getWeatherDataFromSensor();    
   }
-  Serial.println("Test...");
-  delay(1000); // Delay needed before calling the WiFi.begin
 
-   // Sending data to SERVER every 5 minutes
-  wifiSendData_time = millis();
-  if((wifiSendData_time - wifiSendData_OldTime) > (5 * 60000))   // Send a request every 5 minutes
+  // Sending data to SERVER every 5 minutes
+  if((currentTime - wifiSendData_OldTime) > (SENDING_TO_SERVER_TIME_INTERVAL * 60000))   // Send a request every x minutes
   {
-    wifiSendData_OldTime = wifiSendData_time;
-    printLocalTime();
-    Serial.println("Sending data to cloud....");
-  
-    if (WiFi.status() == WL_CONNECTED)  // Check WiFi connection status
-    { 
-      if((!isnan(median_Temperature)) && (!isnan(median_Humidity)) && (!isnan(median_Pression)) && (!isnan(highest_WindSpeed)))
-      {
-        WiFiClient client;
-        HTTPClient http;
-        
-        String httpRequestData = "http://192.168.2.106:8030/addWeather?station_name=" + String("Le-QG") 
-                                  + "&temperature=" + String(median_Temperature)
-                                  + "&humidity=" + String(median_Humidity)
-                                  + "&pressure=" + String(median_Pression)
-                                  + "&wind_speed=" + String(highest_WindSpeed)
-                                  + "&wind_direction=" + String(999.9) + "";
+    wifiSendData_OldTime = currentTime;
 
-        http.begin(client, httpRequestData);
-
-        int httpResponseCode = http.POST("POSTING from ESP32"); //Send the actual POST request
-
-        if (httpResponseCode > 0)
-        {
-          String response = http.getString(); //Get the response to the request
-
-          Serial.print(String(httpResponseCode) + " "); // Print return code
-          Serial.println(response);             // Print request answer
-        }
-        else
-        {
-          Serial.print("Error on sending POST: ");
-          Serial.println(httpResponseCode);
-        }
-        http.end(); //Free resources
-      }
-      else
-      {
-        Serial.println("There is a NAN value !!");
-        
-      }
-
-      // Send all the temperature sensor values
-      if(!isnan(median_Temperature))
-      {
-        WiFiClient client;
-        HTTPClient http;
-        
-        String httpRequestData = "http://192.168.2.106:8030/addTemp?temperature1=" + String(temperature)
-                                  + "&temperature2=" + String(0)
-                                  + "&temperature3=" + String(0)
-                                  + "&temperature4=" + String(0) + "";
-                                
-        http.begin(client, httpRequestData);
-
-        int httpResponseCode = http.POST("POSTING from ESP32"); //Send the actual POST request
-
-        if (httpResponseCode > 0)
-        {
-          String response = http.getString(); //Get the response to the request
-
-          Serial.print(String(httpResponseCode) + " "); // Print return code
-          Serial.println(response);             // Print request answer
-        }
-        else
-        {
-          Serial.print("Error on sending POST: ");
-          Serial.println(httpResponseCode);
-        }
-        http.end(); //Free resources
-      }
-      else
-      {
-        Serial.println("There is a NAN value !!");
-      }
-    }
-    else
+    if((!isnan(weather_var.median_Temperature)) && (!isnan(weather_var.median_Humidity)) && (!isnan(weather_var.median_Pression)))
     {
-      Serial.println("======================================== Error in WiFi =============================================");
-      Serial.println("Error in WiFi connection -- Trying to reconnect...");
-      WiFi.begin(ssid, password);
-      while (WiFi.status() != WL_CONNECTED)
-      { //Check for the connection
-        delay(2000);
-        Serial.println("Re-connecting to WiFi..");
-      }
+      char buffer[200];
+      sprintf(buffer, POST_current_weather, server_address, name_of_local_station , String(weather_var.median_Temperature), String(weather_var.median_Humidity), String(weather_var.median_Pression), String(weather_var.median_Windspeed), String(weather_var.median_AirQuality));
+      send_weather_data_to_server(buffer);
     }
-    Serial.println();
+    else Serial.println("There is a NAN value !!");
   }
-
 
   // Sending the daily data 
   // Sending data to SERVER 2 times a day
@@ -283,72 +150,151 @@ void loop() {
     if((((weather365Time.tm_hour == DAY_HOUR) && (weather365Time.tm_min == DAY_MINUTE)) || 
         ((weather365Time.tm_hour == NIGHT_HOUR) && (weather365Time.tm_min == NIGHT_MINUTE))))
     {
-      Serial.println("Got it!");
       notSaved = false;
-      // Send data to cloud
-      printLocalTime();
-
-      Serial.println("Sending DAILY data to cloud....");
     
-      if (WiFi.status() == WL_CONNECTED)  // Check WiFi connection status
-      { 
-        if((!isnan(median_Temperature)) && (!isnan(median_Humidity)) && (!isnan(median_Pression)))
-        {
-          WiFiClient client;
-          HTTPClient http;
-
-          String httpRequestData = "http://192.168.2.106:8030/addWeather365?station_name=" + String("Le-QG") 
-                                    + "&temperature=" + String(median_Temperature)
-                                    + "&humidity=" + String(median_Humidity)
-                                    + "&pressure=" + String(median_Pression) + "";
-
-          //http.begin("http://192.168.2.106:8030/addWeather365?station_name=abc&temperature=23.68&humidity=75.05&pressure=101.325");
-          http.begin(client, httpRequestData);
-
-          int httpResponseCode = http.POST("POSTING from ESP32"); //Send the actual POST request
-
-          if (httpResponseCode > 0)
-          {
-            String response = http.getString(); //Get the response to the request
-
-            Serial.print(String(httpResponseCode) + " "); // Print return code
-            Serial.println(response);             // Print request answer
-          }
-          else
-          {
-            Serial.print("Error on sending POST: ");
-            Serial.println(httpResponseCode);
-          }
-          http.end(); //Free resources
-        }
-        else
-        {
-          Serial.println("There is a NAN value !!");
-        }
-      }
-      else
+      if((!isnan(weather_var.median_Temperature)) && (!isnan(weather_var.median_Humidity)) && (!isnan(weather_var.median_Pression)))
       {
-        Serial.println("======================================== Error in WiFi =============================================");
-        Serial.println("Error in WiFi connection -- Trying to reconnect...");
-        WiFi.begin(ssid, password);
-        while (WiFi.status() != WL_CONNECTED)
-        { //Check for the connection
-          delay(2000);
-          Serial.println("Re-connecting to WiFi..");
-        }
+        char buffer[200];
+        sprintf(buffer, POST_daily_weather, server_address, name_of_local_station, String(weather_var.median_Temperature), String(weather_var.median_Humidity), String(weather_var.median_Pression));
+        send_weather_data_to_server(buffer);
       }
-      Serial.println();
+      else Serial.println("There is a NAN value !!");
     }
     else notSaved = true;
   }
 }
 
-void printLocalTime(void)
+// *******************************************************************************************
+//
+// Custom function definition
+//
+// *******************************************************************************************
+// Initialize the Bosch BME sensor and ADC input for wind sensor
+void initializeSensor(void)
+{
+  // Initialize the ADC module for the wind sensor
+  Wire.begin(SDA_PIN, SCL_PIN);
+  // initializes the sensor based on I2C library
+  bme.begin(ADD_I2C, Wire);
+
+	if(bme.checkStatus())
+	{
+		if (bme.checkStatus() == BME68X_ERROR)
+		{
+			Serial.println("Sensor error:" + bme.statusString());
+			return;
+		}
+		else if (bme.checkStatus() == BME68X_WARNING) Serial.println("Sensor Warning:" + bme.statusString());
+	}
+	// Set the default configuration for temperature, pressure and humidity
+	bme.setTPH(BME68X_OS_16X,BME68X_OS_16X,BME68X_OS_16X);
+}
+
+// Get new weather data from sensors (Bosch BME + Wind sensor)
+void getWeatherDataFromSensor(void)
+{
+    bme.setOpMode(BME68X_SEQUENTIAL_MODE);
+    // Get data from the Bosch sensor (Temp, Pressure, Humidity, Air Quality)
+    if (bme.fetchData())
+    {
+      bme.getData(data);
+      weather_var.temperature = data.temperature;
+      weather_var.pressure    = data.pressure / 100;
+      weather_var.humidity    = data.humidity;
+      weather_var.AirQuality  = data.gas_resistance;
+
+      samples_Temperature.add(weather_var.temperature);
+      samples_Pression.add(weather_var.pressure);
+      samples_Humidity.add(weather_var.humidity);
+      samples_AirQuality.add(weather_var.AirQuality);
+
+      weather_var.median_Temperature = samples_Temperature.getMedian();
+      weather_var.median_Pression = samples_Pression.getMedian();
+      weather_var.median_Humidity = samples_Humidity.getMedian();
+      weather_var.median_AirQuality = samples_AirQuality.getMedian();
+      //weather_var.median_AirQuality = samples_AirQuality.getHighest();    // Get the highest value of wind speed
+
+      Serial.println(data.temperature);
+    }
+    
+    // Get wind speed from the ADC
+    weather_var.WindSpeed = getWindSpeed();
+    samples_WindSpeed.add(weather_var.WindSpeed);
+    // weather_var.median_Windspeed = samples_WindSpeed.getMedian();
+    //weather_var.median_Windspeed = samples_WindSpeed.getHighest();    // Get the highest value of wind speed
+    weather_var.median_Windspeed = weather_var.WindSpeed;   // Use to debug windsensor. Will save the RAW sensor data
+    //Serial.println("ADC Value = " + String(weather_var.WindSpeed));
+    
+    Serial.println("->AvgTemp = " + String(weather_var.median_Temperature)
+                    + " AvgHum = " + String(weather_var.median_Humidity)
+                    + " AvgPress = " + String(weather_var.median_Pression)
+                    + " HighestWind = " + String(weather_var.median_Windspeed));
+}
+
+// Get the wind speed from the ADC
+float getWindSpeed()
+{
+    int adc_windspeed = analogRead(analogPin); // Read the Analog Input value 
+    adc_windspeed = adc_windspeed - 19;        // Remove offset when sensor not turning
+    if(adc_windspeed <= 0) adc_windspeed = 0;
+
+    return (float)adc_windspeed * 0.006 * 3.6;   // Compute windspeed in m/s
+}
+
+void printLocalTime()
 {
   struct tm timeinfo;
   if(!getLocalTime(&timeinfo)){
     Serial.println("Failed to obtain time");
     return;
   }
-  // Serial.println(&timeinfo, "%A, %B %d %Y %H:%M:%S");
+  //Serial.println(&timeinfo, "%A, %B %d %Y %H:%M:%S");
+}
+
+void try_reconnect_to_wifi()
+{
+  Serial.println("======================================== Error in WiFi =============================================");
+  Serial.println("Error in WiFi connection -- Trying to reconnect...");
+  WiFi.begin(ssid, password);
+  while (WiFi.status() != WL_CONNECTED)
+  { //Check for the connection
+    delay(2000);
+    Serial.println("Re-connecting to WiFi..");
+  }
+}
+
+// ******************************************************************************************************************************
+// Generic function to send data on server.
+// 
+// ******************************************************************************************************************************
+void send_weather_data_to_server(char *buffer)
+{
+  printLocalTime();
+  //Serial.println("Sending data to cloud....");
+  /*
+  if (WiFi.status() == WL_CONNECTED)  // Check WiFi connection status
+  { 
+    WiFiClient client;
+    HTTPClient http;
+    
+    http.begin(client, String(buffer));
+
+    int httpResponseCode = http.POST("POSTING from ESP8266"); //Send the actual POST request
+
+    if (httpResponseCode > 0)
+    {
+      String response = http.getString(); //Get the response to the request
+
+      Serial.print(String(httpResponseCode) + " "); // Print return code
+      Serial.println(response);             // Print request answer
+    }
+    else
+    {
+      Serial.print("Error on sending POST: ");
+      Serial.println(httpResponseCode);
+    }
+    http.end(); // Free resources
+  }
+  else try_reconnect_to_wifi();
+  */
 }
