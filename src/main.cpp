@@ -6,10 +6,10 @@
 #include <RunningMedian.h>
 
 // Mettre à jour les info suivante pour configurer le WiFi:
-const char *ssid = "WiFi-NAME";
-const char *password = "WiFi-Password";
+const char *ssid = "WIFI-NAME";
+const char *password = "WIFI-PASSWORD";
 
-const char *server_address = "SERVER_ADDRESS"; //"192.168.1.236";
+const char *server_address = "weather.computatrum.cloud"; //"192.168.1.236";
 const char *name_of_local_station = "St-Jean-Chrysostome";
 
 // BE CARFUL, the following strings are using %s for data substitution
@@ -32,7 +32,7 @@ const int NIGHT_MINUTE  = 00;
 //**********************************************************************************************
 #define SDA_PIN 2
 #define SCL_PIN 14
-#define ADD_I2C 0x77  // 0x76 or 0x77
+#define ADD_I2C 0x76  // 0x76 or 0x77
 
 #define analogPin A0 /* ESP8266 Analog Pin ADC0 = A0 */
 
@@ -214,7 +214,7 @@ void getWeatherDataFromSensor(void)
       weather_var.median_AirQuality = samples_AirQuality.getMedian();
       //weather_var.median_AirQuality = samples_AirQuality.getHighest();    // Get the highest value of wind speed
 
-      Serial.println(data.temperature);
+      //Serial.println(data.temperature);
     }
     
     // Get wind speed from the ADC
@@ -270,8 +270,7 @@ void try_reconnect_to_wifi()
 void send_weather_data_to_server(char *buffer)
 {
   printLocalTime();
-  //Serial.println("Sending data to cloud....");
-  /*
+  Serial.println("Sending data to cloud....");
   if (WiFi.status() == WL_CONNECTED)  // Check WiFi connection status
   { 
     WiFiClient client;
@@ -296,5 +295,4 @@ void send_weather_data_to_server(char *buffer)
     http.end(); // Free resources
   }
   else try_reconnect_to_wifi();
-  */
 }
