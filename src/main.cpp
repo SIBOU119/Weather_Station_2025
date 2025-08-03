@@ -6,8 +6,8 @@
 #include <RunningMedian.h>
 
 // Mettre à jour les info suivante pour configurer le WiFi:
-const char *ssid = "Mars";
-const char *password = "Pi314159";
+const char *ssid = "WIFI-NAME";
+const char *password = "WIFI-PASSWORD";
 
 const char *server_address = "weather.computatrum.cloud"; //"192.168.1.236";
 const char *name_of_local_station = "St-Jean-Chrysostome";
@@ -32,7 +32,7 @@ const int NIGHT_MINUTE  = 00;
 //**********************************************************************************************
 #define SDA_PIN 2
 #define SCL_PIN 14
-#define ADD_I2C 0x77  // 0x76 or 0x77
+#define ADD_I2C 0x76  // 0x76 or 0x77
 
 #define analogPin A0 /* ESP8266 Analog Pin ADC0 = A0 */
 
